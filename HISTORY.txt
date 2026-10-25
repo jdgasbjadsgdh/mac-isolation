@@ -1,0 +1,169 @@
+MacSteam Isolation 0.1.2
+2026-10-23
+
+WHAT 0.1.2 FIXES
+- No private Steam had ever reached its sign-in window: earlier "passed" checks
+  only saw helper processes. Steam accepts its web UI connection only after
+  running /bin/ps, and macOS refuses setuid programs such as /bin/ps inside a
+  sandbox. A bundled non-setuid msi-ps now answers that query. Verified live:
+  a disposable profile showed DesktopLoginWindow 700x440 in 6-9 seconds.
+- Steam stalled ("BMainLoop appears to have stalled", then a fatal pipe
+  assert) on profiles used before: killed sessions leave POSIX semaphores in
+  the kernel, and the next client reopened a held lock. Every Start Steam now
+  uses a fresh IPC name space, and names recorded by the previous session are
+  unlinked first (121 of 121 removed in the live relaunch test).
+- The Mac becoming unusable while a private Steam was open: Steam's main app
+  and web helper signal each other with session-wide distributed notifications
+  (com.valvesoftware.steam.ActivateSteam, ActivateWebhelper, HideSteam ...).
+  Every Steam on the Mac obeyed every other Steam's, so the private and normal
+  clients activated each other ~100 times a second (launchservicesd SETFRONT
+  log). Private clients now post and observe these under
+  com.macsteam.isolation.<profile id>.*, and inside a private client other
+  Steams report a foreign app ID and cannot be activated. Verified live with
+  the normal Steam open: sign-in window in 5.4 s, 6 front changes in 15 s (all
+  the private client's own), normal Steam never brought forward.
+  The private main app also gets its own ID and Dock name "Steam (<profile>)"
+  and no steam:// claim. The web helper keeps Valve's ID: its Info.plist is
+  code-signed and macOS kills a helper whose Info.plist changed.
+- StarBreak launched from a profile signed in with the user's MAIN account:
+  Steam's game IPC endpoints are fixed loopback ports (Steam3Master
+  127.0.0.1:57343, SteamClientService 57344). The main Steam already held
+  them, so the private game connected to it. Each profile now uses its own
+  pair (30000 + hash(profile id) % 9500 * 2), programs still see 57343/57344,
+  and the kernel profile denies the real ports to private processes.
+- "StarBreak is not installed" in a profile: Steam rejected the minimal app
+  manifest ("Loaded 0 apps"). Profiles now get the installed manifest without
+  LastOwner/LastPlayed; existing profiles are fixed at the next Start Steam.
+- Stop profile: Steam ignores SIGTERM and respawns killed helpers. Stop now uses
+  Steam's own -shutdown inside the profile, keeps the IPC helper alive until
+  Steam exits, then escalates to SIGTERM/SIGKILL for anything left.
+- The startup check passes as soon as the sign-in/desktop window has loaded
+  (up to 60 seconds) and fails on an engine stall.
+Not yet verified live: sign-in to a real account and StarBreak through a
+private profile.
+
+MacSteam Isolation 0.1.1 — native application preview
+2026-10-23
+
+APPLICATION
+~/Downloads/MacSteam Isolation.app
+
+Open the application to manage Steam profiles. Opening it does not launch Steam
+or StarBreak. Steam 1, Steam 2 and Steam 3 are included as separate profiles;
+Add profile creates additional profiles with no fixed two-account limit.
+
+For each profile:
+1. Prepare creates a private Steam app and StarBreak installation, copies Mac
+   SBPE, and copies your current SBPE controls/settings once.
+2. Start Steam starts that profile's client and checks startup for 40 seconds.
+   Sign in to a separate account once the Steam window is ready.
+3. Launch with SBPE starts that profile's StarBreak after the startup check passes.
+4. Stop profile closes processes belonging to that profile and unregisters
+   only its private helper. Closing this manager leaves launched clients running.
+
+Three private Steam clients passed simultaneous live startup on October 23.
+Their web UI processes stayed running and each stored its own private keychain
+item. Test clients were closed afterward. Account sign-in and simultaneous
+StarBreak gameplay remain UNVERIFIED: you need to sign in to the separate
+accounts yourself. A successful startup check is not a successful game login.
+
+The initial updater repair loop is fixed by preserving vendor code/signatures.
+A protected-shell boundary previously stripped the isolation library from
+helpers; command, spawn, exec, system and popen paths now restore captured
+profile values with shell quoting. Uninjected children are also blocked by the
+kernel from primary/foreign POSIX IPC, global Steam pipes and primary keychains.
+
+Steam's CEF web UI cannot install a second Seatbelt sandbox inside this app's
+kernel profile. Private Steam launches therefore use -no-cef-sandbox, retaining
+this app's outer kernel restrictions. Chromium's separate renderer sandbox is
+not active for these private clients. The normal Steam client is unaffected.
+This remains a Steam-specific compatibility preview, not a browser security
+sandbox or a general Sandboxie replacement.
+
+A bounded startup monitor stops only the affected private profile on repeated
+GPU/sandbox failures. It will not stop a profile containing a running game.
+Old monitors cannot stop a newer launch of the same profile. Launch StarBreak
+is disabled until startup checking passes. Start/Stop operations are serialized
+per profile; changed copies still require preparation again.
+
+Each profile receives its own login.keychain-db and a random unlock secret in
+its private Home/Library/Keychains directory (owner-only permissions). The helper
+unlocks that explicit private keychain before starting Steam. No login keychain
+is copied from the Mac, and no default/search-list/reset APIs are used. Tests
+verify that the Mac's normal keychain default and search list remain unchanged.
+Keep the private keychain and unlock.secret together when backing up a profile.
+
+
+PROFILE FILES
+~/Library/Application Support/MacSteam Isolation/profiles/<profile>/
+  Steam.app          private Steam code bundle
+  Home/              private Steam data, account settings and StarBreak copy
+  SBPE/              separate SBPE settings, logs and capture files
+  steam.log          private Steam output
+  starbreak.log      private game output
+  private-helper.plist  uniquely named helper, registered only on Start Steam
+
+No primary Steam login, userdata or saved account credentials are copied.
+StarBreak assets and Mac SBPE code/settings are copied from the installed
+versions. SBPE gameplay keybindings are preserved; the custom EFC recorder is
+initially disabled in new profiles. Original SBPE files are unchanged.
+
+IMPLEMENTATION AND LIMITS
+This is a Steam-specific compatibility layer, not a general security sandbox
+for untrusted applications. It redirects Steam paths, home/preference APIs,
+POSIX IPC and Steam's fixed launchd/Mach helper service. A kernel sandbox
+blocks access to the primary Steam installation/service, outside signals
+and Apple events. Other user files are not generally isolated. SIP and global macOS
+security settings are unchanged; the primary Steam launch agent is untouched.
+
+Steam's original code, bundle metadata and vendor signatures are preserved.
+Private code bundles match the installed Steam copy. Only this manager and
+its own isolation library are ad-hoc signed. The pinned StarBreak executable
+is copied without being re-signed. Re-signing Steam changed file sizes and
+triggered repeated repair/verification during initial live testing; that
+preparation method is no longer used. Previous private test copies are saved
+in each profile's Steam.before-vendor-preservation-* folder for inspection.
+
+Steam may signal children inside the same sandbox, while signals to unrelated
+processes remain blocked. Named pipes and dynamic library paths are redirected
+alongside ordinary files. Steam self-updates can replace private code; changed
+main code is refused at the next launch until prepared again.
+The number of usable concurrent clients is limited by Mac resources and any
+remaining Steam singleton mechanisms, not a profile-count restriction.
+
+This local app targets macOS 13+ and bundles universal arm64/x86_64 native code.
+It currently uses /usr/bin/python3 from the developer tools already installed
+on this Mac. It is not yet a portable, notarized distribution. Preparation
+expects the installed Steam/StarBreak and Downloads/SBPE-Mac-Windows-Parity.
+
+SOURCE / CHECKS (never launch real Steam)
+python3 build_app.py
+python3 tests/test_native.py
+python3 tests/test_backend.py
+python3 tests/test_keychain.py
+python3 tests/test_startup_guard.py
+python3 app_backend.py list
+
+isolate.py provides doctor/prove plus the same explicit profile commands.
+Tests create only their own disposable profiles and uniquely named fixture
+services, and remove those services afterward. No real Steam process is started.
+
+Related deliverables:
+Windows plugin: ~/Downloads/SBPE-Windows-Loading-2026-10-22.zip
+Web spawn timing observer: removed from the installed override; loading plugin
+and previously saved recordings remain available. Applies on the next refresh.
+
+VALIDATION EVIDENCE
+evidence/three-steam-startup-20261023/result.json
+evidence/keychain-test-20261023/
+evidence/shell-boundary-20261023/asan.json
+
+The direct ASan-injected interposer could not initialize alongside ASan's own
+low-level hooks. The actual shell, argv and environment builders were instead
+checked in a non-interposing ASan/UBSan fixture (2000 cases); full process
+interposition is validated separately by native arm64/Rosetta fixtures.
+
+Primary implementation references:
+Apple keychain implementation: https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_keychain/lib/SecKeychain.cpp
+Chromium macOS sandbox design: https://github.com/chromium/chromium/blob/main/sandbox/mac/seatbelt_sandbox_design.md
+Steam CEF option discussion: https://github.com/ValveSoftware/steam-for-linux/issues/8420
